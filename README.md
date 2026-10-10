@@ -1,5 +1,3 @@
-# geospatial-file-measurement-api
-
 
 # Geospatial File Measurement API
 
