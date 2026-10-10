@@ -1,10 +1,11 @@
 
 import math
 import os
-import zipfile
 import tempfile
+import zipfile
 
 import geopandas as gpd
+from pyproj import Geod
 
 
 def process_file(file_path: str, filename: str):
@@ -17,13 +18,14 @@ def process_file(file_path: str, filename: str):
         with tempfile.TemporaryDirectory() as temp_dir:
             with zipfile.ZipFile(file_path, "r") as zip_ref:
                 # Prevent ZIP path traversal
+                root_path = os.path.realpath(temp_dir) + os.sep
+
                 for member in zip_ref.infolist():
                     target = os.path.realpath(
                         os.path.join(temp_dir, member.filename)
                     )
-                    if not target.startswith(
-                        os.path.realpath(temp_dir) + os.sep
-                    ):
+
+                    if not target.startswith(root_path):
                         raise ValueError("Unsafe ZIP file contents")
 
                 zip_ref.extractall(temp_dir)
@@ -38,9 +40,8 @@ def process_file(file_path: str, filename: str):
             if not shp_files:
                 raise ValueError("ZIP does not contain a Shapefile")
 
+            # Process while extracted files still exist
             gdf = gpd.read_file(shp_files[0])
-
-            # Process before the temporary directory is deleted
             return get_file_info(gdf)
 
     else:
@@ -57,20 +58,24 @@ def get_file_info(gdf):
             "Input file has no CRS; accurate measurements cannot be calculated"
         )
 
-    # Reproject coordinates before calculating area or length
-    projected_crs = gdf.estimate_utm_crs()
+    # Convert coordinates to longitude/latitude for geodesic calculations
+    geographic_gdf = gdf.to_crs("EPSG:4326")
 
-    if projected_crs is None:
-        raise ValueError("Could not determine a suitable projected CRS")
+    # Global equal-area projection for polygon area
+    equal_area_gdf = gdf.to_crs("EPSG:6933")
 
-    projected_gdf = gdf.to_crs(projected_crs)
+    # WGS84 ellipsoid for measuring line length over Earth's surface
+    geod = Geod(ellps="WGS84")
 
     for index, row in gdf.iterrows():
         geometry = row.geometry
-        measurement_geometry = projected_gdf.geometry.loc[index]
+        geographic_geometry = geographic_gdf.geometry.loc[index]
+        area_geometry = equal_area_gdf.geometry.loc[index]
 
         feature = {
-            "feature_id": int(index) if isinstance(index, int) else str(index),
+            "feature_id": (
+                int(index) if isinstance(index, int) else str(index)
+            ),
             "geometry_type": (
                 geometry.geom_type if geometry is not None else None
             ),
@@ -81,27 +86,30 @@ def get_file_info(gdf):
             },
         }
 
-        # Handle missing or empty geometries
         if geometry is None or geometry.is_empty:
             feature["measurement"] = None
 
         elif geometry.geom_type in ("Polygon", "MultiPolygon"):
-            area = float(measurement_geometry.area)
+            area = float(area_geometry.area)
+
             feature["area_m2"] = (
                 area if math.isfinite(area) else None
             )
 
         elif geometry.geom_type in ("LineString", "MultiLineString"):
-            length = float(measurement_geometry.length)
+            length = float(
+                abs(geod.geometry_length(geographic_geometry))
+            )
+
             feature["length_m"] = (
                 length if math.isfinite(length) else None
             )
 
         else:
-            # Points and unsupported geometry types need no measurement
+            # Points and unsupported geometries require no measurement
             feature["measurement"] = None
 
-        # Ensure property values can be returned as valid JSON
+        # Convert NumPy scalar values and non-finite floats for JSON
         for key, value in feature["properties"].items():
             if hasattr(value, "item"):
                 value = value.item()
@@ -116,6 +124,9 @@ def get_file_info(gdf):
     return {
         "feature_count": len(gdf),
         "crs": str(gdf.crs),
-        "measurement_crs": str(projected_gdf.crs),
+        "measurement_crs": {
+            "area": "EPSG:6933",
+            "length": "WGS84 geodesic",
+        },
         "features": measurements,
     }
