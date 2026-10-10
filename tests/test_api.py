@@ -66,3 +66,19 @@ def test_missing_crs_is_rejected():
 
     with pytest.raises(ValueError, match="no CRS"):
         get_file_info(gdf)
+
+
+def test_point_has_no_measurement():
+    from shapely.geometry import Point
+
+    gdf = gpd.GeoDataFrame(
+        {"name": ["test"]},
+        geometry=[Point(77.0, 12.0)],
+        crs="EPSG:4326",
+    )
+
+    result = get_file_info(gdf)
+    feature = result["features"][0]
+
+    assert feature["geometry_type"] == "Point"
+    assert feature["measurement"] is None
